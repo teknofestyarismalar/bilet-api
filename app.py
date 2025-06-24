@@ -1,93 +1,90 @@
 from flask import Flask, request, jsonify
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
 import pytesseract
+from pdf2image import convert_from_bytes
 import re
 from datetime import datetime
-from difflib import SequenceMatcher
-from io import BytesIO
+from rapidfuzz import fuzz
 
 app = Flask(__name__)
 
-# Ayarlar
-ACCEPTABLE_DATE_START = datetime(2025, 4, 26)
-ACCEPTABLE_DATE_END = datetime(2025, 5, 7)
-TOLERANCE_TL = 1.0
+ALLOWED_DATE_START = datetime(2025, 4, 26)
+ALLOWED_DATE_END = datetime(2025, 5, 7)
 
-def extract_text_from_pdf(pdf_bytes):
+def extract_text_from_pdf(file_bytes):
+    images = convert_from_bytes(file_bytes.read())
     text = ""
-    try:
-        reader = PdfReader(BytesIO(pdf_bytes))
-        for page in reader.pages:
-            text += page.extract_text() or ""
-    except:
-        pass
-    
-    if len(text.strip()) < 30:
-        images = convert_from_bytes(pdf_bytes)
-        text = ""
-        for img in images:
-            text += pytesseract.image_to_string(img, lang="tur")
+    for image in images:
+        text += pytesseract.image_to_string(image, lang='tur')
     return text
 
-def extract_date(text):
-    pattern = r"\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b"
-    matches = re.findall(pattern, text)
-    for match in matches:
-        for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y"):
+def extract_amount(text):
+    lines = text.splitlines()
+    total = 0.0
+    for line in lines:
+        if 'toplam' in line.lower() or 'bilet' in line.lower():
+            matches = re.findall(r'(\d{1,5}[.,]?\d{0,2})', line)
+            for match in matches:
+                try:
+                    normalized = match.replace('.', '').replace(',', '.')
+                    amount = float(normalized)
+                    if 0 < amount < 5000:  # aşırı büyükleri hariç tut
+                        total += amount
+                except:
+                    continue
+    return round(total, 2)
+
+def extract_dates(text):
+    date_matches = re.findall(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text)
+    valid_dates = []
+    for date_str in date_matches:
+        try:
+            date = datetime.strptime(date_str, "%d.%m.%Y")
+        except:
             try:
-                return datetime.strptime(match, fmt)
+                date = datetime.strptime(date_str, "%d/%m/%Y")
             except:
                 continue
-    return None
+        if ALLOWED_DATE_START <= date <= ALLOWED_DATE_END:
+            valid_dates.append(date)
+    return valid_dates
 
-def extract_amount(text):
-    pattern = r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s?(TL|tl|₺)?"
-    matches = re.findall(pattern, text)
-    if matches:
-        amt = matches[0][0].replace(".", "").replace(",", ".")
-        return float(amt)
-    return None
+def fuzzy_match(a, b):
+    return fuzz.partial_ratio(a.lower(), b.lower()) > 80
 
-def names_similar(name1, name2):
-    return SequenceMatcher(None, name1.lower(), name2.lower()).ratio() > 0.85
+@app.route("/analyze", methods=["POST"])
+def analyze_pdf():
+    file = request.files.get("file")
+    full_name = request.form.get("full_name", "").strip()
+    declared_amount = float(request.form.get("declared_amount", "0"))
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    file = request.files['file']
-    full_name = request.form.get('full_name', '').strip()
-    declared_amount = float(request.form.get('declared_amount', '0'))
+    if not file or not full_name:
+        return jsonify({"valid": False, "issues": ["Eksik dosya veya ad-soyad bilgisi."]})
 
-    pdf_bytes = file.read()
-    text = extract_text_from_pdf(pdf_bytes)
+    text = extract_text_from_pdf(file)
+
+    # Ad-soyad kontrolü
+    name_match = fuzzy_match(full_name, text)
+
+    # Tutar kontrolü
+    extracted_total = extract_amount(text)
+    amount_match = abs(extracted_total - declared_amount) <= 1
+
+    # Tarih kontrolü
+    valid_dates = extract_dates(text)
+    date_match = len(valid_dates) > 0
 
     issues = []
-
-    # 1. Ad soyad kontrolü
-    if full_name.lower() not in text.lower():
-        if not names_similar(full_name, text):
-            issues.append("Bilette yer alan ad-soyad, formdaki ad-soyad ile uyuşmuyor")
-
-    # 2. Tarih kontrolü
-    travel_date = extract_date(text)
-    if not travel_date:
-        issues.append("Fatura tarihi bulunamadı")
-    elif not (ACCEPTABLE_DATE_START <= travel_date <= ACCEPTABLE_DATE_END):
-        issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({ACCEPTABLE_DATE_START.strftime('%d.%m.%Y')} - {ACCEPTABLE_DATE_END.strftime('%d.%m.%Y')})")
-
-    # 3. Tutar kontrolü
-    actual_amount = extract_amount(text)
-    if actual_amount is None:
-        issues.append("Fatura tutarı bulunamadı")
-    elif abs(actual_amount - declared_amount) > TOLERANCE_TL:
-        issues.append(f"Yüklenen bilet tutarı ({actual_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
-
-    valid = len(issues) == 0
+    if not name_match:
+        issues.append("Fatura üzerindeki ad-soyad ile formdaki ad-soyad uyuşmuyor.")
+    if not date_match:
+        issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({ALLOWED_DATE_START.strftime('%d.%m.%Y')} - {ALLOWED_DATE_END.strftime('%d.%m.%Y')})")
+    if not amount_match:
+        issues.append(f"Yüklenen bilet tutarı ({extracted_total} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
 
     return jsonify({
-        "valid": valid,
+        "valid": len(issues) == 0,
         "issues": issues
     })
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=10000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
