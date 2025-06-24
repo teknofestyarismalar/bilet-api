@@ -1,53 +1,45 @@
 from flask import Flask, request, jsonify
-import pytesseract
-from pdf2image import convert_from_bytes
-import io
-from datetime import datetime
 from PyPDF2 import PdfReader
+from datetime import datetime
+import re
 
 app = Flask(__name__)
 
 START_DATE = datetime(2025, 4, 26)
 END_DATE = datetime(2025, 5, 7)
 
-def extract_text_and_amount(pdf_bytes):
+def extract_text_and_info(pdf_bytes):
     try:
-        images = convert_from_bytes(pdf_bytes)
-    except Exception as e:
-        return "", [], f"PDF dönüştürme hatası: {str(e)}"
+        reader = PdfReader(pdf_bytes)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
 
-    text = ""
-    dates = []
-    total = 0
-
-    for image in images:
-        page_text = pytesseract.image_to_string(image, lang="tur")
-        text += page_text
+        dates = []
+        total = 0.0
 
         # Tarihleri bul
-        for line in page_text.split("\n"):
-            if any(ay in line.lower() for ay in ["nisan", "mayıs", "2025"]):
-                try:
-                    parcalar = line.strip().split()
-                    for parca in parcalar:
-                        try:
-                            tarih = datetime.strptime(parca.strip(), "%d.%m.%Y")
-                            dates.append(tarih)
-                        except:
-                            continue
-                except:
-                    continue
+        date_matches = re.findall(r"\d{2}\.\d{2}\.\d{4}", text)
+        for date_str in date_matches:
+            try:
+                date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+                dates.append(date_obj)
+            except:
+                continue
 
-            # Tutarları yakala
-            if "tl" in line.lower():
-                try:
-                    tl = float(line.lower().replace("tl", "").replace(",", ".").strip().split()[0])
-                    if 10 < tl < 5000:
-                        total += tl
-                except:
-                    continue
+        # Tutarları bul
+        amount_matches = re.findall(r"([\d,.]+)\s?TL", text, flags=re.IGNORECASE)
+        for amt in amount_matches:
+            try:
+                amt_clean = float(amt.replace(".", "").replace(",", "."))
+                if 10 < amt_clean < 5000:
+                    total += amt_clean
+            except:
+                continue
 
-    return text, dates, total
+        return text.lower(), dates, total
+    except Exception as e:
+        return "", [], 0.0
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -60,7 +52,7 @@ def analyze():
 
     try:
         content = file.read()
-        text, dates, total = extract_text_and_amount(content)
+        text, dates, total = extract_text_and_info(content)
 
         issues = []
 
@@ -70,13 +62,14 @@ def analyze():
         if abs(total - declared_amount) > 1:
             issues.append(f"Yüklenen bilet tutarı ({total} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
 
-        if full_name not in text.lower():
+        if full_name not in text:
             issues.append("Ad-Soyad, fatura üzerinde bulunamadı.")
 
         return jsonify({
             "valid": len(issues) == 0,
             "issues": issues
         })
+
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"Hata oluştu: {str(e)}"]}), 500
 
