@@ -1,82 +1,83 @@
 from flask import Flask, request, jsonify
-import pytesseract
-from pdf2image import convert_from_bytes
 from PyPDF2 import PdfReader
-from datetime import datetime
+from pdf2image import convert_from_bytes
+import pytesseract
 import io
 import re
-import unicodedata
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Tarih aralığı
-DATE_MIN = datetime(2025, 4, 26)
-DATE_MAX = datetime(2025, 5, 7)
+# Ayar: geçerli tarih aralığı
+MIN_DATE = datetime(2025, 4, 26)
+MAX_DATE = datetime(2025, 5, 7)
 
-def normalize_text(text):
-    # Büyük küçük harf farkını ve Türkçe karakterleri normalize eder
-    text = unicodedata.normalize("NFKD", text).encode("ASCII", "ignore").decode("ASCII")
-    return text.lower()
+def extract_text_from_pdf(file_stream):
+    text = ""
+    images = convert_from_bytes(file_stream.read())
+    for img in images:
+        text += pytesseract.image_to_string(img, lang='tur') + "\n"
+    return text
+
+def extract_amounts(text):
+    matches = re.findall(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))', text)
+    amounts = []
+    for match in matches:
+        cleaned = match.replace('.', '').replace(',', '.')
+        try:
+            amount = float(cleaned)
+            amounts.append(amount)
+        except:
+            continue
+    return amounts
+
+def extract_dates(text):
+    matches = re.findall(r'\d{2}[./-]\d{2}[./-]\d{4}', text)
+    dates = []
+    for date_str in matches:
+        try:
+            date = datetime.strptime(date_str.replace('-', '.').replace('/', '.'), '%d.%m.%Y')
+            dates.append(date)
+        except:
+            continue
+    return dates
 
 @app.route("/analyze", methods=["POST"])
-def analyze():
+def analyze_pdf():
     file = request.files.get("file")
-    full_name = request.form.get("full_name", "").strip()
-    declared_amount = float(request.form.get("declared_amount", 0))
+    full_name = request.form.get("full_name", "").lower()
+    declared_amount = float(request.form.get("declared_amount", "0"))
 
-    issues = []
-    found_name = False
-    found_date = False
-    total_amount = 0
-    extracted_text = ""
-
-    if not file:
-        return jsonify({"valid": False, "issues": ["Dosya alınamadı."], "ocr_text": ""})
+    if not file or not full_name:
+        return jsonify({"valid": False, "issues": ["Eksik dosya veya isim bilgisi."]})
 
     try:
-        # PDF sayfalarını resme dönüştür
-        images = convert_from_bytes(file.read())
-
-        # OCR işlemi
-        for image in images:
-            text = pytesseract.image_to_string(image, lang="tur")
-            extracted_text += text + "\n"
-
-        # Ad-Soyad kontrolü
-        normalized_name = normalize_text(full_name)
-        if normalized_name in normalize_text(extracted_text):
-            found_name = True
-        else:
-            issues.append("Ad-Soyad, fatura üzerinde bulunamadı.")
-
-        # Tarih kontrolü
-        dates_found = re.findall(r"\d{2}[./-]\d{2}[./-]\d{4}", extracted_text)
-        for date_str in dates_found:
-            try:
-                date_obj = datetime.strptime(date_str.replace("-", ".").replace("/", "."), "%d.%m.%Y")
-                if DATE_MIN <= date_obj <= DATE_MAX:
-                    found_date = True
-                    break
-            except:
-                continue
-        if not found_date:
-            issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({DATE_MIN.strftime('%d.%m.%Y')} - {DATE_MAX.strftime('%d.%m.%Y')})")
-
-        # Tutar kontrolü
-        amounts = re.findall(r"\d+[.,]?\d*", extracted_text)
-        try:
-            total_amount = sum([float(a.replace(",", ".")) for a in amounts])
-        except:
-            total_amount = 0
-
-        if abs(total_amount - declared_amount) > 1:
-            issues.append(f"Yüklenen bilet tutarı ({total_amount:.0f} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
-
-        return jsonify({
-            "valid": len(issues) == 0,
-            "issues": issues,
-            "ocr_text": extracted_text  # debug amaçlı tüm metin
-        })
-
+        text = extract_text_from_pdf(file.stream)
     except Exception as e:
-        return jsonify({"valid": False, "issues": [f"PDF işleme hatası: {str(e)}"], "ocr_text": extracted_text})
+        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
+
+    issues = []
+
+    # Ad kontrolü
+    if full_name.lower() not in text.lower():
+        issues.append("Ad-Soyad, fatura üzerinde bulunamadı.")
+
+    # Tarih kontrolü
+    dates = extract_dates(text)
+    if not any(MIN_DATE <= d <= MAX_DATE for d in dates):
+        issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({MIN_DATE.strftime('%d.%m.%Y')} - {MAX_DATE.strftime('%d.%m.%Y')})")
+
+    # Tutar kontrolü
+    amounts = extract_amounts(text)
+    total_amount = sum(amounts)
+    if abs(total_amount - declared_amount) > 1:
+        issues.append(f"Yüklenen bilet tutarı ({total_amount:.0f} TL), formda beyan edilen tutar ({declared_amount:.1f} TL) ile uyuşmuyor")
+
+    if issues:
+        return jsonify({"valid": False, "issues": issues})
+    else:
+        return jsonify({"valid": True})
+
+# ⚠️ Bu satır Render'da çalışması için ZORUNLUDUR!
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
