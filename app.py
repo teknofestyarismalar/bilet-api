@@ -7,9 +7,11 @@ from rapidfuzz import fuzz
 
 app = Flask(__name__)
 
+# Kabul edilen tarih aralığı
 ALLOWED_DATE_START = datetime(2025, 4, 26)
 ALLOWED_DATE_END = datetime(2025, 5, 7)
 
+# PDF içinden metni çıkar
 def extract_text_from_pdf(file_bytes):
     images = convert_from_bytes(file_bytes.read())
     text = ""
@@ -17,40 +19,39 @@ def extract_text_from_pdf(file_bytes):
         text += pytesseract.image_to_string(image, lang='tur')
     return text
 
+# Sadece "Toplam Tutar" satırından tutar çek
 def extract_amount(text):
     lines = text.splitlines()
-    total = 0.0
     for line in lines:
-        if 'toplam' in line.lower() or 'bilet' in line.lower():
-            matches = re.findall(r'(\d{1,5}[.,]?\d{0,2})', line)
-            for match in matches:
+        if 'toplam tutar' in line.lower():
+            match = re.search(r'(\d+[.,]\d{2})', line)
+            if match:
                 try:
-                    normalized = match.replace('.', '').replace(',', '.')
-                    amount = float(normalized)
-                    if 0 < amount < 5000:  # aşırı büyükleri hariç tut
-                        total += amount
+                    return float(match.group(1).replace(',', '.'))
                 except:
                     continue
-    return round(total, 2)
+    return 0.0
 
+# Sadece "hareket" kelimesi geçen satırlardan tarih ayıkla
 def extract_dates(text):
-    date_matches = re.findall(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text)
-    valid_dates = []
-    for date_str in date_matches:
-        try:
-            date = datetime.strptime(date_str, "%d.%m.%Y")
-        except:
-            try:
-                date = datetime.strptime(date_str, "%d/%m/%Y")
-            except:
-                continue
-        if ALLOWED_DATE_START <= date <= ALLOWED_DATE_END:
-            valid_dates.append(date)
-    return valid_dates
+    lines = text.splitlines()
+    for line in lines:
+        if 'hareket' in line.lower():
+            match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', line)
+            if match:
+                try:
+                    date = datetime.strptime(match.group(1), '%d.%m.%Y')
+                    if ALLOWED_DATE_START <= date <= ALLOWED_DATE_END:
+                        return [date]
+                except:
+                    continue
+    return []
 
+# Ad-soyad benzerliğini kontrol et (fuzzy match)
 def fuzzy_match(a, b):
     return fuzz.partial_ratio(a.lower(), b.lower()) > 80
 
+# Ana API endpoint
 @app.route("/analyze", methods=["POST"])
 def analyze_pdf():
     file = request.files.get("file")
@@ -62,17 +63,14 @@ def analyze_pdf():
 
     text = extract_text_from_pdf(file)
 
-    # Ad-soyad kontrolü
+    # Kontroller
     name_match = fuzzy_match(full_name, text)
-
-    # Tutar kontrolü
     extracted_total = extract_amount(text)
     amount_match = abs(extracted_total - declared_amount) <= 1
-
-    # Tarih kontrolü
     valid_dates = extract_dates(text)
     date_match = len(valid_dates) > 0
 
+    # Geri bildirim nedenleri
     issues = []
     if not name_match:
         issues.append("Fatura üzerindeki ad-soyad ile formdaki ad-soyad uyuşmuyor.")
@@ -86,5 +84,6 @@ def analyze_pdf():
         "issues": issues
     })
 
+# Sunucuyu başlat
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
