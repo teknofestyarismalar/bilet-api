@@ -8,9 +8,19 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Ayar: geçerli tarih aralığı
+# Geçerli tarih aralığı
 MIN_DATE = datetime(2025, 4, 26)
 MAX_DATE = datetime(2025, 5, 7)
+
+# Anahtar kelimeler (sadece bu satırlardan tutar alınır)
+KEYWORDS = [
+    "TOPLAM (TL) (KDV DAHİL)",
+    "Toplam Tutar",
+    "ÜCRET (Price)",
+    "Ödenecek Tutar",
+    "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
+    "KDV DAHİL ÜCRET / FARE"
+]
 
 def extract_text_from_pdf(file_stream):
     text = ""
@@ -19,16 +29,20 @@ def extract_text_from_pdf(file_stream):
         text += pytesseract.image_to_string(img, lang='tur') + "\n"
     return text
 
-def extract_amounts(text):
-    matches = re.findall(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))', text)
+def extract_amounts_from_keywords(text):
+    lines = text.splitlines()
     amounts = []
-    for match in matches:
-        cleaned = match.replace('.', '').replace(',', '.')
-        try:
-            amount = float(cleaned)
-            amounts.append(amount)
-        except:
-            continue
+    for line in lines:
+        for keyword in KEYWORDS:
+            if keyword.lower() in line.lower():
+                match = re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))', line)
+                if match:
+                    amount_str = match.group(1).replace('.', '').replace(',', '.')
+                    try:
+                        amount = float(amount_str)
+                        amounts.append(amount)
+                    except:
+                        continue
     return amounts
 
 def extract_dates(text):
@@ -67,8 +81,8 @@ def analyze_pdf():
     if not any(MIN_DATE <= d <= MAX_DATE for d in dates):
         issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({MIN_DATE.strftime('%d.%m.%Y')} - {MAX_DATE.strftime('%d.%m.%Y')})")
 
-    # Tutar kontrolü
-    amounts = extract_amounts(text)
+    # Tutar kontrolü (sadece anahtar kelimeler üzerinden)
+    amounts = extract_amounts_from_keywords(text)
     total_amount = sum(amounts)
     if abs(total_amount - declared_amount) > 1:
         issues.append(f"Yüklenen bilet tutarı ({total_amount:.0f} TL), formda beyan edilen tutar ({declared_amount:.1f} TL) ile uyuşmuyor")
@@ -78,6 +92,6 @@ def analyze_pdf():
     else:
         return jsonify({"valid": True})
 
-# ⚠️ Bu satır Render'da çalışması için ZORUNLUDUR!
+# Render üzerinde çalışması için zorunlu
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
