@@ -1,20 +1,10 @@
 FROM python:3.10-slim
 
-# Sistem paketlerini yükle
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    libtesseract-dev \
-    poppler-utils \
-    && apt-get clean
+RUN apt-get update && \
+    apt-get install -y tesseract-ocr libtesseract-dev poppler-utils && \
+    pip install --no-cache-dir Flask==3.1.1 PyPDF2==3.0.1 pytesseract==0.3.13 pdf2image==1.17.0 Pillow==11.2.1
 
-# Çalışma dizini
+COPY . /app
 WORKDIR /app
 
-# Gerekli dosyaları kopyala
-COPY . .
-
-# Python bağımlılıklarını kur
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Uygulamayı başlat
 CMD ["python", "app.py"]
