@@ -12,7 +12,7 @@ app = Flask(__name__)
 MIN_DATE = datetime(2025, 4, 26)
 MAX_DATE = datetime(2025, 5, 7)
 
-# OCR ile PDF’ten metin çıkar
+# OCR ile PDF'ten metin çıkarma
 def extract_text_from_pdf(file_stream):
     text = ""
     images = convert_from_bytes(file_stream.read())
@@ -20,30 +20,34 @@ def extract_text_from_pdf(file_stream):
         text += pytesseract.image_to_string(img, lang='tur') + "\n"
     return text
 
-# Anahtar kelimeler içeren satırlardan sayı ayıkla
-def extract_target_amount(text):
-    keywords = [
-        "toplam tutar",
-        "toplam (tl)",
-        "ücret",
-        "ödenecek tutar",
-        "toplam bedel",
-        "fare",
-        "total"
+# Tutarları ayıklama
+def extract_amounts(text):
+    amount_labels = [
+        "TOPLAM (TL) (KDV DAHİL)",
+        "Toplam Tutar",
+        "ÜCRET (Price)",
+        "Ödenecek Tutar",
+        "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
+        "KDV DAHİL ÜCRET / FARE"
     ]
-    lines = text.lower().splitlines()
-    for line in lines:
-        if any(keyword in line for keyword in keywords):
-            match = re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))', line)
-            if match:
-                cleaned = match.group(1).replace('.', '').replace(',', '.')
-                try:
-                    return float(cleaned)
-                except:
-                    continue
-    return 0.0
+    pattern = r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))'
+    lines = text.splitlines()
+    amounts = []
 
-# Tarihleri ayıkla
+    for line in lines:
+        for label in amount_labels:
+            if label.lower() in line.lower():
+                matches = re.findall(pattern, line)
+                for match in matches:
+                    cleaned = match.replace('.', '').replace(',', '.')
+                    try:
+                        amount = float(cleaned)
+                        amounts.append(amount)
+                    except:
+                        continue
+    return amounts
+
+# Tarihleri ayıklama
 def extract_dates(text):
     matches = re.findall(r'\d{2}[./-]\d{2}[./-]\d{4}', text)
     dates = []
@@ -66,8 +70,8 @@ def analyze_pdf():
 
     try:
         text = extract_text_from_pdf(file.stream)
-print("==== OCR ÇIKTISI ====")
-print(text)
+        print("==== OCR ÇIKTISI ====")
+        print(text)
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
@@ -83,7 +87,8 @@ print(text)
         issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({MIN_DATE.strftime('%d.%m.%Y')} - {MAX_DATE.strftime('%d.%m.%Y')})")
 
     # Tutar kontrolü
-    total_amount = extract_target_amount(text)
+    amounts = extract_amounts(text)
+    total_amount = sum(amounts)
     if abs(total_amount - declared_amount) > 1:
         issues.append(f"Yüklenen bilet tutarı ({total_amount:.0f} TL), formda beyan edilen tutar ({declared_amount:.1f} TL) ile uyuşmuyor")
 
@@ -92,6 +97,6 @@ print(text)
     else:
         return jsonify({"valid": True})
 
-# Render’da çalışabilmesi için zorunlu
+# Render için zorunlu
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
