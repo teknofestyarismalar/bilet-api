@@ -1,18 +1,13 @@
 FROM python:3.10-slim
 
-# Sistemi güncelle, poppler ve tesseract + turkish dil dosyasını yükle
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    tesseract-ocr-tur \
-    poppler-utils \
-    && apt-get clean
+RUN apt-get update && \
+    apt-get install -y tesseract-ocr libtesseract-dev tesseract-ocr-tur poppler-utils
 
-# Gereken Python paketlerini yükle
-COPY requirements.txt .
+WORKDIR /app
+
+COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Uygulama dosyalarını kopyala
 COPY . .
 
-# Uygulamayı başlat
 CMD ["python", "app.py"]
