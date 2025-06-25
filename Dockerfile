@@ -1,10 +1,19 @@
 FROM python:3.10-slim
 
+# Sistem bağımlılıkları
 RUN apt-get update && \
-    apt-get install -y tesseract-ocr libtesseract-dev poppler-utils && \
-    pip install --no-cache-dir Flask==3.1.1 PyPDF2==3.0.1 pytesseract==0.3.13 pdf2image==1.17.0 Pillow==11.2.1
+    apt-get install -y tesseract-ocr libgl1 libglib2.0-0 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY . /app
+# Çalışma dizini
 WORKDIR /app
 
+# Gereksinimler ve kod
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Uygulama başlat
 CMD ["python", "app.py"]
