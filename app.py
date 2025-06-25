@@ -12,16 +12,7 @@ app = Flask(__name__)
 MIN_DATE = datetime(2025, 4, 26)
 MAX_DATE = datetime(2025, 5, 7)
 
-# Anahtar kelimeler (sadece bu satırlardan tutar alınır)
-KEYWORDS = [
-    "TOPLAM (TL) (KDV DAHİL)",
-    "Toplam Tutar",
-    "ÜCRET (Price)",
-    "Ödenecek Tutar",
-    "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
-    "KDV DAHİL ÜCRET / FARE"
-]
-
+# OCR ile görselden metin çıkar
 def extract_text_from_pdf(file_stream):
     text = ""
     images = convert_from_bytes(file_stream.read())
@@ -29,22 +20,31 @@ def extract_text_from_pdf(file_stream):
         text += pytesseract.image_to_string(img, lang='tur') + "\n"
     return text
 
-def extract_amounts_from_keywords(text):
-    lines = text.splitlines()
+# Yalnızca belirli ifadeleri içeren satırlardan tutar çek
+def extract_amounts(text):
+    keywords = [
+        "TOPLAM (TL) (KDV DAHİL)",
+        "Toplam Tutar",
+        "ÜCRET (Price)",
+        "Ödenecek Tutar",
+        "TOPLAM BEDEL (TL)/Total",
+        "KDV DAHİL ÜCRET / FARE"
+    ]
+    
     amounts = []
-    for line in lines:
-        for keyword in KEYWORDS:
+    for line in text.splitlines():
+        for keyword in keywords:
             if keyword.lower() in line.lower():
-                match = re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))', line)
+                match = re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)', line)
                 if match:
-                    amount_str = match.group(1).replace('.', '').replace(',', '.')
+                    cleaned = match.group().replace('.', '').replace(',', '.')
                     try:
-                        amount = float(amount_str)
-                        amounts.append(amount)
+                        amounts.append(float(cleaned))
                     except:
                         continue
     return amounts
 
+# Tarihleri bulur
 def extract_dates(text):
     matches = re.findall(r'\d{2}[./-]\d{2}[./-]\d{4}', text)
     dates = []
@@ -72,7 +72,7 @@ def analyze_pdf():
 
     issues = []
 
-    # Ad kontrolü
+    # İsim kontrolü
     if full_name.lower() not in text.lower():
         issues.append("Ad-Soyad, fatura üzerinde bulunamadı.")
 
@@ -81,8 +81,8 @@ def analyze_pdf():
     if not any(MIN_DATE <= d <= MAX_DATE for d in dates):
         issues.append(f"Fatura tarihi desteklenen tarih aralığında değil ({MIN_DATE.strftime('%d.%m.%Y')} - {MAX_DATE.strftime('%d.%m.%Y')})")
 
-    # Tutar kontrolü (sadece anahtar kelimeler üzerinden)
-    amounts = extract_amounts_from_keywords(text)
+    # Tutar kontrolü
+    amounts = extract_amounts(text)
     total_amount = sum(amounts)
     if abs(total_amount - declared_amount) > 1:
         issues.append(f"Yüklenen bilet tutarı ({total_amount:.0f} TL), formda beyan edilen tutar ({declared_amount:.1f} TL) ile uyuşmuyor")
@@ -92,6 +92,6 @@ def analyze_pdf():
     else:
         return jsonify({"valid": True})
 
-# Render üzerinde çalışması için zorunlu
+# Render veya benzeri platformda çalıştırma için
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
