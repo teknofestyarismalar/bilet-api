@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: bilet-api
-    env: python
-    buildCommand: "apt-get update && apt-get install -y tesseract-ocr libtesseract-dev && pip install -r requirements.txt"
-    startCommand: "python app.py"
-    plan: free
