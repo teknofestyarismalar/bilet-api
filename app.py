@@ -66,6 +66,8 @@ def analyze_pdf():
 
     try:
         text = extract_text_from_pdf(file.stream)
+print("==== OCR ÇIKTISI ====")
+print(text)
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
