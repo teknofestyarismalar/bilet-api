@@ -1,14 +1,13 @@
+import os
+import tempfile
 from flask import Flask, request, jsonify
-import pytesseract
 from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_path
+import pytesseract
 from PIL import Image
-import io
-import re
 
 app = Flask(__name__)
 
-# Anahtar kelimeler (büyük/küçük harf duyarsız eşleşme yapılacak)
 KEYWORDS = [
     "TOPLAM (TL) (KDV DAHİL)",
     "Toplam Tutar",
@@ -18,77 +17,81 @@ KEYWORDS = [
     "KDV DAHİL ÜCRET / FARE"
 ]
 
-def extract_text_from_pdf(file_stream):
-    text = ""
+@app.route('/')
+def index():
+    return "OK"
 
-    # Önce metin olarak çıkarmayı dene
+@app.route('/analyze', methods=['POST'])
+def analyze_pdf():
     try:
-        reader = PdfReader(file_stream)
-        for page in reader.pages:
-            text += page.extract_text() or ""
-    except Exception as e:
-        print("PDF metin çıkarma hatası:", str(e))
+        if 'pdf' not in request.files or 'declared_amount' not in request.form:
+            return jsonify({"error": "Eksik veri"}), 400
 
-    # Eğer metin yoksa veya yetersizse OCR'a geç
-    if not text.strip() or len(text) < 30:
-        try:
-            file_stream.seek(0)
-            images = convert_from_bytes(file_stream.read())
-            for image in images:
-                ocr_text = pytesseract.image_to_string(image, lang="tur")
-                print("==== OCR ÇIKTISI ====")
-                print(ocr_text)
-                text += ocr_text
-        except Exception as e:
-            raise RuntimeError(f"OCR başarısız: {str(e)}")
+        file = request.files['pdf']
+        declared_amount = float(request.form['declared_amount'])
 
-    return text
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            file.save(temp_pdf.name)
 
-def extract_amount_from_text(text):
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        for keyword in KEYWORDS:
-            if keyword.lower() in line.lower():
-                possible_line = line
-                # Bazen sayı bir alt satırda olabilir
-                if not any(char.isdigit() for char in line) and i + 1 < len(lines):
-                    possible_line += " " + lines[i + 1]
+        text = extract_text_from_pdf(temp_pdf.name)
 
-                # Sayı bulma
-                match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", possible_line.replace(" ", ""))
-                if match:
-                    amount_str = match.group(1).replace(".", "").replace(",", ".")
-                    try:
-                        return float(amount_str)
-                    except ValueError:
-                        continue
-    return 0.0
-
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    try:
-        file = request.files["file"]
-        full_name = request.form["full_name"]
-        declared_amount = float(request.form["declared_amount"])
-
-        text = extract_text_from_pdf(file.stream)
-        print("==== TAM OCR METNİ ====")
-        print(text)
+        # ✅ OCR çıktısını dosyaya yaz
+        with open("ocr_output.txt", "w", encoding="utf-8") as f:
+            f.write(text)
 
         extracted_amount = extract_amount_from_text(text)
 
-        issues = []
-        if abs(extracted_amount - declared_amount) > 1:
-            issues.append(
-                f"Yüklenen bilet tutarı ({extracted_amount:.0f} TL), formda beyan edilen tutar ({declared_amount:.1f} TL) ile uyuşmuyor"
-            )
+        if extracted_amount == 0:
+            return jsonify({
+                "valid": False,
+                "issues": ["PDF okunamadı veya tutar bulunamadı."]
+            })
 
-        is_valid = len(issues) == 0
-        return jsonify({"valid": is_valid, "issues": issues})
+        if abs(extracted_amount - declared_amount) > 1:
+            return jsonify({
+                "valid": False,
+                "issues": [f"Yüklenen bilet tutarı ({extracted_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor"]
+            })
+
+        return jsonify({"valid": True})
 
     except Exception as e:
-        print("ANALİZ HATASI:", str(e))
-        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
+        return jsonify({
+            "valid": False,
+            "issues": [f"PDF okunamadı: {str(e)}"]
+        })
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+def extract_text_from_pdf(pdf_path):
+    try:
+        # İlk olarak metin olarak okumayı dene
+        reader = PdfReader(pdf_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        if any(keyword.lower() in text.lower() for keyword in KEYWORDS):
+            return text
+
+        # Metin okunamıyorsa OCR ile dene
+        images = convert_from_path(pdf_path)
+        ocr_text = ""
+        for image in images:
+            ocr_text += pytesseract.image_to_string(image, lang="tur")
+        return ocr_text
+
+    except Exception as e:
+        raise Exception("OCR hatası: " + str(e))
+
+def extract_amount_from_text(text):
+    import re
+    pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    if not matches:
+        return 0
+    cleaned = matches[-1].replace(".", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except:
+        return 0
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
