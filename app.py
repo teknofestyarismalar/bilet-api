@@ -5,6 +5,7 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
+import re
 
 app = Flask(__name__)
 
@@ -24,21 +25,14 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze_pdf():
     try:
-        if 'pdf' not in request.files or 'declared_amount' not in request.form:
-            return jsonify({"error": "Eksik veri"}), 400
-
-        file = request.files['pdf']
-        declared_amount = float(request.form['declared_amount'])
+        declared_amount = float(request.headers.get('Declared-Amount', '0'))
+        if not request.data:
+            return jsonify({"valid": False, "issues": ["PDF verisi alınamadı."]})
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-            file.save(temp_pdf.name)
+            temp_pdf.write(request.data)
 
         text = extract_text_from_pdf(temp_pdf.name)
-
-        # ✅ OCR çıktısını dosyaya yaz
-        with open("ocr_output.txt", "w", encoding="utf-8") as f:
-            f.write(text)
-
         extracted_amount = extract_amount_from_text(text)
 
         if extracted_amount == 0:
@@ -63,7 +57,6 @@ def analyze_pdf():
 
 def extract_text_from_pdf(pdf_path):
     try:
-        # İlk olarak metin olarak okumayı dene
         reader = PdfReader(pdf_path)
         text = ""
         for page in reader.pages:
@@ -71,7 +64,7 @@ def extract_text_from_pdf(pdf_path):
         if any(keyword.lower() in text.lower() for keyword in KEYWORDS):
             return text
 
-        # Metin okunamıyorsa OCR ile dene
+        # OCR fallback
         images = convert_from_path(pdf_path)
         ocr_text = ""
         for image in images:
@@ -82,7 +75,6 @@ def extract_text_from_pdf(pdf_path):
         raise Exception("OCR hatası: " + str(e))
 
 def extract_amount_from_text(text):
-    import re
     pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
     matches = re.findall(pattern, text, re.IGNORECASE)
     if not matches:
