@@ -1,7 +1,10 @@
 import os
 import tempfile
 from flask import Flask, request, jsonify
-import fitz  # PyMuPDF
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
 from difflib import SequenceMatcher
 import re
 
@@ -30,28 +33,26 @@ def analyze_pdf():
         if not file or not declared_amount or not full_name:
             return jsonify({"valid": False, "issues": ["Eksik veri"]}), 400
 
-        if file.mimetype != "application/pdf":
-            return jsonify({"valid": False, "issues": ["Yüklenen dosya PDF değil."]}), 400
-
         declared_amount = float(declared_amount)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             file.save(temp_pdf.name)
-            print(f"PDF kaydedildi: {temp_pdf.name}")
-            print(f"Dosya boyutu: {os.path.getsize(temp_pdf.name)} bayt")
+            pdf_path = temp_pdf.name
 
-        text_pages = extract_text_by_page(temp_pdf.name)
+        # PDF'ten metin çıkar
+        try:
+            text_pages = extract_text_by_page(pdf_path)
+        except Exception as e:
+            return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 400
+
         all_text = "\n".join(text_pages)
-
         amounts = extract_all_amounts(text_pages)
-        print("Extracted amounts:", amounts)
         total_amount = sum(amounts)
 
         extracted_name = extract_name(all_text)
         similarity = SequenceMatcher(None, full_name.lower(), extracted_name.lower()).ratio()
 
         issues = []
-
         if not amounts:
             issues.append("PDF okunamadı veya tutar bulunamadı.")
         if similarity < 0.8:
@@ -64,16 +65,19 @@ def analyze_pdf():
         })
 
     except Exception as e:
-        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
-
+        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 500
 
 def extract_text_by_page(pdf_path):
     try:
-        doc = fitz.open(pdf_path)
-        return [page.get_text() for page in doc]
+        reader = PdfReader(pdf_path)
+        return [page.extract_text() or "" for page in reader.pages]
     except Exception as e:
-        raise Exception(f"PyMuPDF PDF açma hatası: {str(e)}")
-
+        print("📄 PDF metinle açılamadı, OCR deneniyor:", e)
+        try:
+            images = convert_from_path(pdf_path)
+            return [pytesseract.image_to_string(img, lang="tur") for img in images]
+        except Exception as ocr_error:
+            raise Exception(f"OCR da başarısız: {ocr_error}")
 
 def extract_all_amounts(text_pages):
     seen_tickets = set()
@@ -87,17 +91,15 @@ def extract_all_amounts(text_pages):
         for line in lines:
             for kw in KEYWORDS:
                 if kw.lower() in line.lower():
-                    matches = re.findall(r"[\d\s]*[\.,]\d{2}", line)
-                    for m in matches:
-                        cleaned = m.replace(" ", "").replace(".", "").replace(",", ".")
+                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", line)
+                    if match:
+                        raw = match.group(1).replace(".", "").replace(",", ".")
                         try:
-                            val = float(cleaned)
-                            if val > 0:
-                                amount = val
+                            amount = float(raw)
                         except:
                             continue
 
-            date_match = re.search(r"\d{2}/\d{2}/\d{4}", line)
+            date_match = re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", line)
             if date_match:
                 date = date_match.group()
 
@@ -107,7 +109,6 @@ def extract_all_amounts(text_pages):
 
     return amounts
 
-
 def extract_name(text):
     lines = text.splitlines()
     for line in lines:
@@ -116,7 +117,6 @@ def extract_name(text):
             if len(parts) > 1:
                 return parts[1].strip()
     return "Belirlenemedi"
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
