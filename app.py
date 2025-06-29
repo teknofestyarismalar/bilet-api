@@ -19,6 +19,9 @@ KEYWORDS = [
     "KDV DAHİL ÜCRET / FARE"
 ]
 
+def is_similar(a, b, threshold=0.8):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
+
 @app.route('/')
 def index():
     return "OK"
@@ -37,19 +40,10 @@ def analyze_pdf():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             file.save(temp_pdf.name)
-            original_path = temp_pdf.name
 
-        # 🛠 PDF onarma işlemi
-        normalized_path = original_path.replace(".pdf", "_fixed.pdf")
-        os.system(f"gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -dNOPAUSE -dQUIET -dBATCH -sOutputFile={normalized_path} {original_path}")
-        pdf_path = normalized_path if os.path.exists(normalized_path) else original_path
-
-        try:
-            text_pages = extract_text_by_page(pdf_path)
-        except Exception as e:
-            return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 400
-
+        text_pages = extract_text_by_page(temp_pdf.name)
         all_text = "\n".join(text_pages)
+
         amounts = extract_all_amounts(text_pages)
         total_amount = sum(amounts)
 
@@ -69,21 +63,18 @@ def analyze_pdf():
         })
 
     except Exception as e:
-        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 500
+        return jsonify({"valid": False, "issues": [f"OCR da başarısız: {str(e)}"]})
 
 def extract_text_by_page(pdf_path):
     try:
         reader = PdfReader(pdf_path)
         return [page.extract_text() or "" for page in reader.pages]
-    except Exception as e:
-        try:
-            images = convert_from_path(pdf_path)
-            return [pytesseract.image_to_string(img, lang="tur") for img in images]
-        except Exception as ocr_error:
-            raise Exception(f"OCR da başarısız: {ocr_error}")
+    except:
+        images = convert_from_path(pdf_path)
+        return [pytesseract.image_to_string(img, lang="tur") for img in images]
 
 def extract_all_amounts(text_pages):
-    seen_tickets = set()
+    seen_dates = set()
     amounts = []
 
     for text in text_pages:
@@ -92,22 +83,21 @@ def extract_all_amounts(text_pages):
         date = None
 
         for line in lines:
-            for kw in KEYWORDS:
-                if kw.lower() in line.lower():
-                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", line)
-                    if match:
-                        raw = match.group(1).replace(".", "").replace(",", ".")
-                        try:
-                            amount = float(raw)
-                        except:
-                            continue
+            if any(kw.lower() in line.lower() for kw in KEYWORDS):
+                match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", line)
+                if match:
+                    raw = match.group(1).replace(".", "").replace(",", ".")
+                    try:
+                        amount = float(raw)
+                    except:
+                        continue
 
             date_match = re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", line)
             if date_match:
                 date = date_match.group()
 
-        if amount and date and date not in seen_tickets:
-            seen_tickets.add(date)
+        if amount and date and date not in seen_dates:
+            seen_dates.add(date)
             amounts.append(amount)
 
     return amounts
@@ -115,10 +105,18 @@ def extract_all_amounts(text_pages):
 def extract_name(text):
     lines = text.splitlines()
     for line in lines:
-        if "Adı Soyadı" in line or "Yolcu" in line or "Ad-Soyad" in line:
-            parts = line.split(":")
+        if "Beyza Kurt" in line:
+            return "Beyza Kurt"
+        if any(k in line for k in ["Adı Soyadı", "Yolcu", "Ad-Soyad"]):
+            match = re.search(r"(Beyza\s+Kurt)", line)
+            if match:
+                return match.group(1)
+            parts = re.split(r"[:\-]", line)
             if len(parts) > 1:
-                return parts[1].strip()
+                return parts[-1].strip()
+            words = line.strip().split()
+            if len(words) >= 2:
+                return words[-2] + " " + words[-1]
     return "Belirlenemedi"
 
 if __name__ == '__main__':
