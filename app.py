@@ -2,9 +2,6 @@ import os
 import tempfile
 from flask import Flask, request, jsonify
 from PyPDF2 import PdfReader
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
 from difflib import SequenceMatcher
 import re
 
@@ -18,9 +15,6 @@ KEYWORDS = [
     "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
     "KDV DAHİL ÜCRET / FARE"
 ]
-
-def is_similar(a, b, threshold=0.8):
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
 
 @app.route('/')
 def index():
@@ -63,15 +57,14 @@ def analyze_pdf():
         })
 
     except Exception as e:
-        return jsonify({"valid": False, "issues": [f"OCR da başarısız: {str(e)}"]})
+        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
 def extract_text_by_page(pdf_path):
     try:
         reader = PdfReader(pdf_path)
         return [page.extract_text() or "" for page in reader.pages]
-    except:
-        images = convert_from_path(pdf_path)
-        return [pytesseract.image_to_string(img, lang="tur") for img in images]
+    except Exception as e:
+        raise Exception(f"PyMuPDF PDF açma hatası: {e}")
 
 def extract_all_amounts(text_pages):
     seen_dates = set()
