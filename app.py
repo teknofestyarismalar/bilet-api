@@ -70,12 +70,18 @@ def analyze_pdf():
 
 def extract_text_by_page(pdf_path):
     try:
+        # PyPDF2 ile PDF'den metin çıkarmayı dene
         reader = PdfReader(pdf_path)
         text_pages = [page.extract_text() or "" for page in reader.pages]
+
+        # En az bir sayfa başarıyla okunmuşsa onu döndür
         if any(text.strip() for text in text_pages):
             return text_pages
+
     except Exception as e:
         print(f"PyPDF2 failed: {e}")
+
+    # PyPDF2 başarısız olursa OCR fallback devreye girsin
     try:
         images = convert_from_path(pdf_path)
         return [pytesseract.image_to_string(img, lang="tur") for img in images]
