@@ -11,7 +11,12 @@ import re
 app = Flask(__name__)
 
 KEYWORDS = [
-    "TOPLAM", "Tutar", "ÜCRET", "Ödenecek", "BEDEL", "KDV"
+    "TOPLAM (TL) (KDV DAHİL)",
+    "Toplam Tutar",
+    "ÜCRET (Price)",
+    "Ödenecek Tutar",
+    "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
+    "KDV DAHİL ÜCRET / FARE"
 ]
 
 @app.route('/')
@@ -40,7 +45,7 @@ def analyze_pdf():
         all_text = "\n".join(text_pages)
 
         amounts = extract_all_amounts(text_pages)
-        print("Extracted amounts:", amounts)  # Debug log
+        print("Extracted amounts:", amounts)
         total_amount = sum(amounts)
 
         extracted_name = extract_name(all_text)
@@ -62,18 +67,21 @@ def analyze_pdf():
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
+
 def extract_text_by_page(pdf_path):
-    reader = PdfReader(pdf_path)
-    text_pages = [page.extract_text() or "" for page in reader.pages]
+    try:
+        reader = PdfReader(pdf_path)
+        text_pages = [page.extract_text() or "" for page in reader.pages]
+        if any(text.strip() for text in text_pages):
+            return text_pages
+    except Exception as e:
+        print(f"PyPDF2 failed: {e}")
+    try:
+        images = convert_from_path(pdf_path)
+        return [pytesseract.image_to_string(img, lang="tur") for img in images]
+    except Exception as e:
+        raise Exception(f"OCR da başarısız: {str(e)}")
 
-    if all(not t.strip() for t in text_pages):
-        try:
-            images = convert_from_path(pdf_path)
-            return [pytesseract.image_to_string(img, lang="tur") for img in images]
-        except Exception as e:
-            raise Exception(f"OCR da başarısız: {str(e)}")
-
-    return text_pages
 
 def extract_all_amounts(text_pages):
     seen_tickets = set()
@@ -85,16 +93,17 @@ def extract_all_amounts(text_pages):
         date = None
 
         for line in lines:
-            if any(kw.lower() in line.lower() for kw in KEYWORDS):
-                matches = re.findall(r"[\d\s]*[\.,]\d{2}", line)
-                for m in matches:
-                    cleaned = m.replace(" ", "").replace(".", "").replace(",", ".")
-                    try:
-                        val = float(cleaned)
-                        if val > 0:
-                            amount = val
-                    except:
-                        continue
+            for kw in KEYWORDS:
+                if kw.lower() in line.lower():
+                    matches = re.findall(r"[\d\s]*[\.,]\d{2}", line)
+                    for m in matches:
+                        cleaned = m.replace(" ", "").replace(".", "").replace(",", ".")
+                        try:
+                            val = float(cleaned)
+                            if val > 0:
+                                amount = val
+                        except:
+                            continue
 
             date_match = re.search(r"\d{2}/\d{2}/\d{4}", line)
             if date_match:
@@ -106,6 +115,7 @@ def extract_all_amounts(text_pages):
 
     return amounts
 
+
 def extract_name(text):
     lines = text.splitlines()
     for line in lines:
@@ -114,6 +124,7 @@ def extract_name(text):
             if len(parts) > 1:
                 return parts[1].strip()
     return "Belirlenemedi"
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
