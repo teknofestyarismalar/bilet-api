@@ -6,6 +6,7 @@ from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
 import re
+from difflib import SequenceMatcher
 
 app = Flask(__name__)
 
@@ -18,72 +19,62 @@ KEYWORDS = [
     "KDV DAHİL ÜCRET / FARE"
 ]
 
-def extract_text_from_pdf(pdf_path):
-    reader = PdfReader(pdf_path)
-    text = ""
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted
+@app.route('/')
+def index():
+    return "OK"
 
-    if any(k.lower() in text.lower() for k in KEYWORDS):
-        return text
-
-    images = convert_from_path(pdf_path)
-    for image in images:
-        text += pytesseract.image_to_string(image, lang="tur")
-
-    return text
-
-def extract_amounts(text):
-    pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
-    matches = re.findall(pattern, text, re.IGNORECASE)
-    values = set()
-    for match in matches:
-        try:
-            amount = float(match.replace(".", "").replace(",", "."))
-            values.add(amount)
-        except:
-            continue
-    return list(values)
-
-def extract_names(text):
-    name_pattern = r"(?:Sayın|Sn\.?)\s+([A-ZÇĞİÖŞÜ][a-zçğıöşü]+\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü]+)"
-    return re.findall(name_pattern, text)
-
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    if "pdf" not in request.files or "declared_amount" not in request.form:
-        return jsonify({"valid": False, "issues": ["Eksik veri"]})
-
+@app.route('/analyze', methods=['POST'])
+def analyze_pdf():
     try:
-        declared = float(request.form["declared_amount"])
-        uploaded = request.files["pdf"]
+        if 'pdf' not in request.files or 'declared_amount' not in request.form:
+            return jsonify({"valid": False, "issues": ["Eksik veri"]})
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            uploaded.save(tmp.name)
+        pdf_file = request.files['pdf']
+        declared_amount = float(request.form['declared_amount'])
+        full_name = request.form.get("full_name", "").strip()
 
-        text = extract_text_from_pdf(tmp.name)
-        amounts = extract_amounts(text)
-        names = extract_names(text)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            pdf_file.save(temp_pdf.name)
+            pdf_path = temp_pdf.name
 
-        if not amounts:
-            return jsonify({"valid": False, "issues": ["PDF okunamadı veya tutar bulunamadı."]})
+        # OCR ile tüm sayfaları işle
+        pages_text = extract_text_per_page(pdf_path)
 
-        matched_amounts = [a for a in amounts if abs(a - declared) < 1]
-        total = sum(set(amounts))  # aynı bilet tekrar yüklenmişse iki kez saymamak için set
+        seen_tickets = set()
+        total_amount = 0
+        all_names = []
+        issues = []
+
+        for text in pages_text:
+            name = extract_name(text)
+            if name:
+                all_names.append(name)
+
+            date = extract_date(text)
+            amount = extract_amount_from_text(text)
+
+            # Aynı tarihli bilet zaten varsa sayma
+            if date and date in seen_tickets:
+                continue
+            if date:
+                seen_tickets.add(date)
+
+            total_amount += amount
+
+        # İsim uyuşmazlığı kontrolü
+        matched_name = all_names[0] if all_names else ""
+        similarity = SequenceMatcher(None, full_name.lower(), matched_name.lower()).ratio()
 
         issues = []
-        matched_name = names[0] if names else ""
 
-        if not matched_amounts and abs(total - declared) > 1:
-            issues.append(f"Yüklenen bilet tutarı ({total} TL), formda beyan edilen tutar ({declared} TL) ile uyuşmuyor")
+        if similarity < 0.8:
+            issues.append("Belgedeki isim formdaki isimle uyuşmuyor.")
 
-        if names:
-            form_name = request.form.get("full_name", "").strip().lower()
-            doc_name = names[0].strip().lower()
-            if form_name != doc_name:
-                issues.append("Belgedeki isim formdaki isimle uyuşmuyor")
+        if abs(total_amount - declared_amount) > 1:
+            issues.append(f"Yüklenen bilet tutarı ({total_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
+
+        if not total_amount:
+            issues.append("PDF okunamadı veya tutar bulunamadı.")
 
         return jsonify({
             "valid": len(issues) == 0,
@@ -92,7 +83,40 @@ def analyze():
         })
 
     except Exception as e:
-        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
+        return jsonify({
+            "valid": False,
+            "issues": [f"PDF okunamadı: {str(e)}"]
+        })
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+
+def extract_text_per_page(pdf_path):
+    images = convert_from_path(pdf_path)
+    texts = []
+    for img in images:
+        text = pytesseract.image_to_string(img, lang="tur")
+        texts.append(text)
+    return texts
+
+def extract_amount_from_text(text):
+    pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    if not matches:
+        return 0
+    cleaned = matches[-1].replace(".", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except:
+        return 0
+
+def extract_name(text):
+    # Muhtemelen ad soyad büyük harfli, bu satırı filtreleyebiliriz
+    lines = text.split("\n")
+    candidates = [line.strip() for line in lines if re.match(r"^[A-ZÇĞİÖŞÜ ]{5,}$", line.strip())]
+    return candidates[0] if candidates else ""
+
+def extract_date(text):
+    match = re.search(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b", text)
+    return match.group() if match else None
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
