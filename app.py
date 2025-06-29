@@ -68,8 +68,11 @@ def analyze_pdf():
 
 
 def extract_text_by_page(pdf_path):
-    doc = fitz.open(pdf_path)
-    return [page.get_text() for page in doc]
+    try:
+        doc = fitz.open(pdf_path)
+        return [page.get_text() for page in doc]
+    except Exception as e:
+        raise Exception(f"PyMuPDF PDF açma hatası: {str(e)}")
 
 
 def extract_all_amounts(text_pages):
