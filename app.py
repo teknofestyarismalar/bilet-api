@@ -11,12 +11,7 @@ import re
 app = Flask(__name__)
 
 KEYWORDS = [
-    "TOPLAM (TL) (KDV DAHİL)",
-    "Toplam Tutar",
-    "ÜCRET (Price)",
-    "Ödenecek Tutar",
-    "TOPLAM BEDEL (TL)/Total: [KDV DAHİL]",
-    "KDV DAHİL ÜCRET / FARE"
+    "TOPLAM", "Tutar", "ÜCRET", "Ödenecek", "BEDEL", "KDV"
 ]
 
 @app.route('/')
@@ -45,6 +40,7 @@ def analyze_pdf():
         all_text = "\n".join(text_pages)
 
         amounts = extract_all_amounts(text_pages)
+        print("Extracted amounts:", amounts)  # Debug log
         total_amount = sum(amounts)
 
         extracted_name = extract_name(all_text)
@@ -66,7 +62,6 @@ def analyze_pdf():
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
-
 def extract_text_by_page(pdf_path):
     reader = PdfReader(pdf_path)
     text_pages = [page.extract_text() or "" for page in reader.pages]
@@ -80,7 +75,6 @@ def extract_text_by_page(pdf_path):
 
     return text_pages
 
-
 def extract_all_amounts(text_pages):
     seen_tickets = set()
     amounts = []
@@ -91,17 +85,18 @@ def extract_all_amounts(text_pages):
         date = None
 
         for line in lines:
-            for kw in KEYWORDS:
-                if kw.lower() in line.lower():
-                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", line)
-                    if match:
-                        raw = match.group(1).replace(".", "").replace(",", ".")
-                        try:
-                            amount = float(raw)
-                        except:
-                            continue
+            if any(kw.lower() in line.lower() for kw in KEYWORDS):
+                matches = re.findall(r"[\d\s]*[\.,]\d{2}", line)
+                for m in matches:
+                    cleaned = m.replace(" ", "").replace(".", "").replace(",", ".")
+                    try:
+                        val = float(cleaned)
+                        if val > 0:
+                            amount = val
+                    except:
+                        continue
 
-            date_match = re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", line)
+            date_match = re.search(r"\d{2}/\d{2}/\d{4}", line)
             if date_match:
                 date = date_match.group()
 
@@ -111,7 +106,6 @@ def extract_all_amounts(text_pages):
 
     return amounts
 
-
 def extract_name(text):
     lines = text.splitlines()
     for line in lines:
@@ -120,7 +114,6 @@ def extract_name(text):
             if len(parts) > 1:
                 return parts[1].strip()
     return "Belirlenemedi"
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
