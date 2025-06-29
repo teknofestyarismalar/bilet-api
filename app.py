@@ -33,6 +33,9 @@ def analyze_pdf():
         if not file or not declared_amount or not full_name:
             return jsonify({"valid": False, "issues": ["Eksik veri"]}), 400
 
+        if file.mimetype != "application/pdf":
+            return jsonify({"valid": False, "issues": ["Yüklenen dosya PDF değil."]}), 400
+
         declared_amount = float(declared_amount)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
@@ -63,13 +66,20 @@ def analyze_pdf():
     except Exception as e:
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
+
 def extract_text_by_page(pdf_path):
-    try:
-        reader = PdfReader(pdf_path)
-        return [page.extract_text() or "" for page in reader.pages]
-    except:
-        images = convert_from_path(pdf_path)
-        return [pytesseract.image_to_string(img, lang="tur") for img in images]
+    reader = PdfReader(pdf_path)
+    text_pages = [page.extract_text() or "" for page in reader.pages]
+
+    if all(not t.strip() for t in text_pages):
+        try:
+            images = convert_from_path(pdf_path)
+            return [pytesseract.image_to_string(img, lang="tur") for img in images]
+        except Exception as e:
+            raise Exception(f"OCR da başarısız: {str(e)}")
+
+    return text_pages
+
 
 def extract_all_amounts(text_pages):
     seen_tickets = set()
@@ -91,7 +101,6 @@ def extract_all_amounts(text_pages):
                         except:
                             continue
 
-            # Örnek tarih formatı için
             date_match = re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", line)
             if date_match:
                 date = date_match.group()
@@ -102,14 +111,16 @@ def extract_all_amounts(text_pages):
 
     return amounts
 
+
 def extract_name(text):
     lines = text.splitlines()
     for line in lines:
         if "Adı Soyadı" in line or "Yolcu" in line or "Ad-Soyad" in line:
-            words = line.strip().split(":")
-            if len(words) > 1:
-                return words[1].strip()
+            parts = line.split(":")
+            if len(parts) > 1:
+                return parts[1].strip()
     return "Belirlenemedi"
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
