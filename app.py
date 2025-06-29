@@ -5,6 +5,7 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
+import difflib
 import re
 
 app = Flask(__name__)
@@ -25,85 +26,102 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze_pdf():
     try:
-        if 'pdf' not in request.files or 'declared_amount' not in request.form:
-            return jsonify({"valid": False, "issues": ["Eksik veri"]})
+        if 'pdf' not in request.files or 'declared_amount' not in request.form or 'full_name' not in request.form:
+            return jsonify({"valid": False, "issues": ["Eksik veri"]}), 400
 
         file = request.files['pdf']
         declared_amount = float(request.form['declared_amount'])
-        user_name = request.form.get('full_name', "").strip().lower()
+        form_name = request.form['full_name']
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             file.save(temp_pdf.name)
 
-        pages = convert_from_path(temp_pdf.name)
-        total_amount = 0
-        seen_trips = set()
-        names_found = set()
+        text = extract_text_from_pdf(temp_pdf.name)
 
-        for page in pages:
-            text = pytesseract.image_to_string(page, lang="tur")
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
-            if not lines:
-                continue
+        # OCR çıktısını loglamak istersen
+        # with open("ocr_debug.txt", "w", encoding="utf-8") as f:
+        #     f.write(text)
 
-            # 🔍 İsim kontrolü
-            name_positions = [i for i, l in enumerate(lines) if user_name in l.lower()]
-            if name_positions:
-                name_index = name_positions[0]
-                names_found.add(True)
-            else:
-                names_found.add(False)
+        extracted_amount = extract_amount_from_text(text)
+        matched_name, similarity = find_best_matching_name(form_name, text)
 
-            # 🚍 Hareket tarihi ve saat kontrolü
-            date_pattern = r"(\d{2}[./-]\d{2}[./-]\d{4})"
-            time_pattern = r"(\d{2}[:.]\d{2})"
-            trip_id = None
-
-            for line in lines:
-                date_match = re.search(date_pattern, line)
-                time_match = re.search(time_pattern, line)
-                if date_match and time_match:
-                    trip_id = f"{date_match.group(1)}_{time_match.group(1)}"
-                    break
-
-            if trip_id in seen_trips:
-                continue  # Aynı bilet, tekrar sayma
-            if trip_id:
-                seen_trips.add(trip_id)
-
-            # 💰 Tutar çıkarma
-            text_lower = "\n".join(lines).lower()
-            pattern = r"(?:" + "|".join(re.escape(k.lower()) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
-            matches = re.findall(pattern, text_lower, re.IGNORECASE)
-
-            if matches:
-                last_match = matches[-1].replace(".", "").replace(",", ".")
-                try:
-                    extracted = float(last_match)
-                    total_amount += extracted
-                except:
-                    continue
-
-        # ✔️ Kontroller
-        if not any(names_found):
-            return jsonify({"valid": False, "issues": ["Belgedeki isim formdaki isimle uyuşmuyor."]})
-
-        if total_amount == 0:
-            return jsonify({"valid": False, "issues": ["PDF okunamadı veya tutar bulunamadı."]})
-
-        if abs(total_amount - declared_amount) > 1:
+        if similarity < 0.80:
             return jsonify({
                 "valid": False,
-                "issues": [f"Yüklenen bilet tutarı ({total_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor"]
+                "issues": ["Belgedeki isim formdaki isimle uyuşmuyor."],
+                "matched_name": matched_name,
+                "similarity": similarity
             })
 
-        return jsonify({"valid": True})
+        if extracted_amount == 0:
+            return jsonify({
+                "valid": False,
+                "issues": ["PDF okunamadı veya tutar bulunamadı."],
+                "matched_name": matched_name,
+                "similarity": similarity
+            })
+
+        if abs(extracted_amount - declared_amount) > 1:
+            return jsonify({
+                "valid": False,
+                "issues": [f"Yüklenen bilet tutarı ({extracted_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor"],
+                "matched_name": matched_name,
+                "similarity": similarity
+            })
+
+        return jsonify({
+            "valid": True,
+            "matched_name": matched_name,
+            "similarity": similarity
+        })
 
     except Exception as e:
         return jsonify({
             "valid": False,
             "issues": [f"PDF okunamadı: {str(e)}"]
         })
+
+def extract_text_from_pdf(pdf_path):
+    try:
+        reader = PdfReader(pdf_path)
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+
+        if any(k.lower() in text.lower() for k in KEYWORDS):
+            return text
+
+        images = convert_from_path(pdf_path)
+        ocr_text = ""
+        for image in images:
+            ocr_text += pytesseract.image_to_string(image, lang="tur")
+        return ocr_text
+
+    except Exception as e:
+        raise Exception("OCR hatası: " + str(e))
+
+def extract_amount_from_text(text):
+    pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    if not matches:
+        return 0
+    cleaned = matches[-1].replace(".", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except:
+        return 0
+
+def find_best_matching_name(form_name, text):
+    best_ratio = 0
+    best_match = ""
+    for line in text.split("\n"):
+        ratio = difflib.SequenceMatcher(None, form_name.lower(), line.strip().lower()).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = line.strip()
+    return best_match, best_ratio
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
