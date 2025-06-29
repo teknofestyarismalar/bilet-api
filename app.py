@@ -1,10 +1,7 @@
 import os
 import tempfile
 from flask import Flask, request, jsonify
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
+import fitz  # PyMuPDF
 from difflib import SequenceMatcher
 import re
 
@@ -40,6 +37,8 @@ def analyze_pdf():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             file.save(temp_pdf.name)
+            print(f"PDF kaydedildi: {temp_pdf.name}")
+            print(f"Dosya boyutu: {os.path.getsize(temp_pdf.name)} bayt")
 
         text_pages = extract_text_by_page(temp_pdf.name)
         all_text = "\n".join(text_pages)
@@ -69,24 +68,8 @@ def analyze_pdf():
 
 
 def extract_text_by_page(pdf_path):
-    try:
-        # PyPDF2 ile PDF'den metin çıkarmayı dene
-        reader = PdfReader(pdf_path)
-        text_pages = [page.extract_text() or "" for page in reader.pages]
-
-        # En az bir sayfa başarıyla okunmuşsa onu döndür
-        if any(text.strip() for text in text_pages):
-            return text_pages
-
-    except Exception as e:
-        print(f"PyPDF2 failed: {e}")
-
-    # PyPDF2 başarısız olursa OCR fallback devreye girsin
-    try:
-        images = convert_from_path(pdf_path)
-        return [pytesseract.image_to_string(img, lang="tur") for img in images]
-    except Exception as e:
-        raise Exception(f"OCR da başarısız: {str(e)}")
+    doc = fitz.open(pdf_path)
+    return [page.get_text() for page in doc]
 
 
 def extract_all_amounts(text_pages):
