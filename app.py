@@ -26,6 +26,10 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze_pdf():
     try:
+        print("✅ İstek alındı /analyze")
+        print("📎 request.files:", request.files)
+        print("📤 request.form:", request.form)
+
         file = request.files.get('pdf')
         declared_amount = request.form.get('declared_amount')
         full_name = request.form.get('full_name')
@@ -39,10 +43,10 @@ def analyze_pdf():
             file.save(temp_pdf.name)
             pdf_path = temp_pdf.name
 
-        # PDF'ten metin çıkar
         try:
             text_pages = extract_text_by_page(pdf_path)
         except Exception as e:
+            print("❌ PDF işleme hatası:", str(e))
             return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 400
 
         all_text = "\n".join(text_pages)
@@ -58,6 +62,11 @@ def analyze_pdf():
         if similarity < 0.8:
             issues.append("Belgedeki isim formdaki isimle uyuşmuyor.")
 
+        print("📑 Toplam tutar:", total_amount)
+        print("📛 Form ismi:", full_name)
+        print("🧾 Belgeden çıkarılan isim:", extracted_name)
+        print("🔍 Benzerlik oranı:", similarity)
+
         return jsonify({
             "valid": len(issues) == 0 and abs(total_amount - declared_amount) <= 1,
             "issues": issues,
@@ -65,14 +74,16 @@ def analyze_pdf():
         })
 
     except Exception as e:
+        print("🚨 Genel sunucu hatası:", str(e))
         return jsonify({"valid": False, "issues": [f"PDF okunamadı: {e}"]}), 500
 
 def extract_text_by_page(pdf_path):
     try:
+        print("📄 Metin çıkarma deneniyor (PyPDF2)")
         reader = PdfReader(pdf_path)
         return [page.extract_text() or "" for page in reader.pages]
     except Exception as e:
-        print("📄 PDF metinle açılamadı, OCR deneniyor:", e)
+        print("❗ PyPDF2 başarısız, OCR deneniyor:", e)
         try:
             images = convert_from_path(pdf_path)
             return [pytesseract.image_to_string(img, lang="tur") for img in images]
