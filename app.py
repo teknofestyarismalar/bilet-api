@@ -5,7 +5,7 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
-import difflib
+from difflib import SequenceMatcher
 import re
 
 app = Flask(__name__)
@@ -26,129 +26,90 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze_pdf():
     try:
-        if 'pdf' not in request.files or 'declared_amount' not in request.form:
-            return jsonify({
-                "valid": False,
-                "issues": ["Eksik veri"]
-            })
+        file = request.files.get('pdf')
+        declared_amount = request.form.get('declared_amount')
+        full_name = request.form.get('full_name')
 
-        file = request.files['pdf']
-        declared_amount = float(request.form['declared_amount'])
-        full_name = request.form.get('full_name', '').strip()
+        if not file or not declared_amount or not full_name:
+            return jsonify({"valid": False, "issues": ["Eksik veri"]}), 400
 
-        if not full_name:
-            return jsonify({
-                "valid": False,
-                "issues": ["Eksik veri"]
-            })
+        declared_amount = float(declared_amount)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             file.save(temp_pdf.name)
 
-        text = extract_text_from_pdf(temp_pdf.name)
+        text_pages = extract_text_by_page(temp_pdf.name)
+        all_text = "\n".join(text_pages)
 
-        # OCR çıktısını yaz (debug için)
-        with open("ocr_output.txt", "w", encoding="utf-8") as f:
-            f.write(text)
+        amounts = extract_all_amounts(text_pages)
+        total_amount = sum(amounts)
 
-        extracted_amounts = extract_all_amounts(text)
-        total_amount = sum(extracted_amounts)
-
-        extracted_names = extract_possible_names(text)
-        matched_name = match_name(full_name, extracted_names)
+        extracted_name = extract_name(all_text)
+        similarity = SequenceMatcher(None, full_name.lower(), extracted_name.lower()).ratio()
 
         issues = []
 
-        if total_amount == 0:
+        if not amounts:
             issues.append("PDF okunamadı veya tutar bulunamadı.")
-        elif abs(total_amount - declared_amount) > 1:
-            issues.append(f"Yüklenen bilet tutarı ({total_amount} TL), formda beyan edilen tutar ({declared_amount} TL) ile uyuşmuyor")
-
-        if not matched_name:
+        if similarity < 0.8:
             issues.append("Belgedeki isim formdaki isimle uyuşmuyor.")
 
-        if issues:
-            return jsonify({
-                "valid": False,
-                "issues": issues,
-                "extracted_name": extracted_names[0] if extracted_names else "BULUNAMADI"
-            })
-
-        return jsonify({"valid": True})
-
-    except Exception as e:
         return jsonify({
-            "valid": False,
-            "issues": [f"PDF okunamadı: {str(e)}"]
+            "valid": len(issues) == 0 and abs(total_amount - declared_amount) <= 1,
+            "issues": issues,
+            "extracted_name": extracted_name
         })
 
-def extract_text_from_pdf(pdf_path):
-    from pdf2image.exceptions import PDFPageCountError
-    from PIL import UnidentifiedImageError
-
-    try:
-        # Önce PyPDF2 ile dene
-        try:
-            reader = PdfReader(pdf_path)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() or ""
-            if any(keyword.lower() in text.lower() for keyword in KEYWORDS):
-                return text
-        except Exception as e:
-            print("PyPDF2 ile metin okunamadı, OCR ile devam edilecek:", str(e))
-
-        # OCR ile dene
-        images = convert_from_path(pdf_path, dpi=200, single_file=False)
-        ocr_text = ""
-        for i, image in enumerate(images):
-            try:
-                ocr_text += pytesseract.image_to_string(image, lang="tur") + "\n"
-            except UnidentifiedImageError:
-                print(f"{i+1}. sayfa okunamadı, atlanıyor.")
-                continue
-
-        return ocr_text
-
-    except PDFPageCountError:
-        raise Exception("Sayfa sayısı alınamadı. Dosya bozuk olabilir.")
     except Exception as e:
-        raise Exception("OCR hatası: " + str(e))
+        return jsonify({"valid": False, "issues": [f"PDF okunamadı: {str(e)}"]})
 
-def extract_all_amounts(text):
-    pattern = r"(?:" + "|".join(re.escape(k) for k in KEYWORDS) + r")\D{0,20}(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})"
-    matches = re.findall(pattern, text, re.IGNORECASE)
-    values = []
-    seen = set()
-    for match in matches:
-        cleaned = match.replace(".", "").replace(",", ".")
-        try:
-            amount = float(cleaned)
-            if amount not in seen:
-                values.append(amount)
-                seen.add(amount)
-        except:
-            continue
-    return values
+def extract_text_by_page(pdf_path):
+    try:
+        reader = PdfReader(pdf_path)
+        return [page.extract_text() or "" for page in reader.pages]
+    except:
+        images = convert_from_path(pdf_path)
+        return [pytesseract.image_to_string(img, lang="tur") for img in images]
 
-def extract_possible_names(text):
+def extract_all_amounts(text_pages):
+    seen_tickets = set()
+    amounts = []
+
+    for text in text_pages:
+        lines = text.splitlines()
+        amount = None
+        date = None
+
+        for line in lines:
+            for kw in KEYWORDS:
+                if kw.lower() in line.lower():
+                    match = re.search(r"(\d{1,3}(?:[\.,]\d{3})*[\.,]?\d{0,2})", line)
+                    if match:
+                        raw = match.group(1).replace(".", "").replace(",", ".")
+                        try:
+                            amount = float(raw)
+                        except:
+                            continue
+
+            # Örnek tarih formatı için
+            date_match = re.search(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}", line)
+            if date_match:
+                date = date_match.group()
+
+        if amount and date and date not in seen_tickets:
+            seen_tickets.add(date)
+            amounts.append(amount)
+
+    return amounts
+
+def extract_name(text):
     lines = text.splitlines()
-    possible_names = []
     for line in lines:
-        if any(keyword in line.lower() for keyword in ["ad", "soyad", "adı", "yolcu", "name"]):
-            words = line.strip().split()
-            if 2 <= len(words) <= 5:
-                possible_names.append(" ".join(words))
-    return possible_names
-
-def match_name(form_name, extracted_names):
-    form_name_clean = form_name.lower().strip()
-    for name in extracted_names:
-        name_clean = name.lower().strip()
-        ratio = difflib.SequenceMatcher(None, form_name_clean, name_clean).ratio()
-        if ratio >= 0.8:
-            return True
-    return False
+        if "Adı Soyadı" in line or "Yolcu" in line or "Ad-Soyad" in line:
+            words = line.strip().split(":")
+            if len(words) > 1:
+                return words[1].strip()
+    return "Belirlenemedi"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
